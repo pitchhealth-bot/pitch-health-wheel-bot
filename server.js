@@ -18,54 +18,49 @@ const {
 
 /*
   DISCORD INTERACTIONS
-  IMPORTANT:
-  - Must use express.text() here so Discord signature verification uses raw body
+  Use express.raw so Discord signature verification uses the exact raw bytes.
 */
-app.post("/interactions", express.text({ type: "application/json" }), async (req, res) => {
+app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
   try {
-    console.log("=== /interactions hit ===");
-    console.log("signature header exists:", !!req.get("X-Signature-Ed25519"));
-    console.log("timestamp header exists:", !!req.get("X-Signature-Timestamp"));
-    console.log("public key exists:", !!DISCORD_PUBLIC_KEY);
-    console.log("raw body:", req.body);
-
     const signature = req.get("X-Signature-Ed25519");
     const timestamp = req.get("X-Signature-Timestamp");
+    const rawBody = req.body;
+
+    console.log("=== /interactions hit ===");
+    console.log("signature header exists:", !!signature);
+    console.log("timestamp header exists:", !!timestamp);
+    console.log("public key exists:", !!DISCORD_PUBLIC_KEY);
 
     if (!signature || !timestamp || !DISCORD_PUBLIC_KEY) {
       console.log("Missing Discord signature headers or public key");
       return res.status(401).send("Missing Discord signature headers or public key");
     }
 
-    const isValid = verifyKey(req.body, signature, timestamp, DISCORD_PUBLIC_KEY);
+    const isValid = verifyKey(rawBody, signature, timestamp, DISCORD_PUBLIC_KEY);
     console.log("verifyKey result:", isValid);
 
     if (!isValid) {
-      console.log("Invalid signature");
       return res.status(401).send("Invalid signature");
     }
 
-    const interaction = JSON.parse(req.body);
+    const interaction = JSON.parse(rawBody.toString("utf8"));
     console.log("interaction type:", interaction.type);
 
-    // Discord verification ping
+    // Discord verification
     if (interaction.type === InteractionType.PING) {
       console.log("Returning PONG");
       return res.json({ type: InteractionResponseType.PONG });
     }
 
-    // Slash commands
+    // Slash command
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data?.name;
-      console.log("commandName:", commandName);
 
       if (commandName === "spin") {
         const user = interaction.member?.user || interaction.user;
         const spinnerName = user?.global_name || user?.username || "Unknown User";
         const discordUserId = user?.id || "";
         const sessionId = crypto.randomBytes(6).toString("hex");
-
-        console.log("Creating spin record for:", spinnerName, discordUserId, sessionId);
 
         await createSpinRecord(spinnerName, discordUserId, sessionId);
 
@@ -93,7 +88,7 @@ app.post("/interactions", express.text({ type: "application/json" }), async (req
 });
 
 /*
-  Use normal JSON parsing AFTER /interactions
+  Normal JSON parsing for non-Discord routes
 */
 app.use(express.json());
 
@@ -137,10 +132,6 @@ app.post("/complete-spin", async (req, res) => {
   try {
     const { sessionId, reward } = req.body;
 
-    console.log("=== /complete-spin hit ===");
-    console.log("sessionId:", sessionId);
-    console.log("reward:", reward);
-
     if (!sessionId || !reward) {
       return res.status(400).json({ error: "sessionId and reward are required" });
     }
@@ -159,7 +150,6 @@ app.post("/complete-spin", async (req, res) => {
 
     if (!findResponse.ok) {
       const text = await findResponse.text();
-      console.error("Airtable lookup failed:", findResponse.status, text);
       throw new Error(`Airtable lookup failed: ${findResponse.status} ${text}`);
     }
 
@@ -187,7 +177,6 @@ app.post("/complete-spin", async (req, res) => {
 
     if (!updateResponse.ok) {
       const text = await updateResponse.text();
-      console.error("Airtable update failed:", updateResponse.status, text);
       throw new Error(`Airtable update failed: ${updateResponse.status} ${text}`);
     }
 
@@ -198,17 +187,10 @@ app.post("/complete-spin", async (req, res) => {
   }
 });
 
-/*
-  Optional manual test route
-*/
 app.post("/spin", async (req, res) => {
   try {
     const { spinnerName = "Test User", discordUserId = "manual-test" } = req.body || {};
     const sessionId = crypto.randomBytes(6).toString("hex");
-
-    console.log("=== /spin manual test hit ===");
-    console.log("spinnerName:", spinnerName);
-    console.log("discordUserId:", discordUserId);
 
     await createSpinRecord(spinnerName, discordUserId, sessionId);
 
