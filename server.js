@@ -18,7 +18,7 @@ const {
 
 /*
   DISCORD INTERACTIONS
-  Use express.raw so Discord signature verification uses the exact raw bytes.
+  Use express.raw so Discord signature verification uses exact raw bytes
 */
 app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
   try {
@@ -36,7 +36,13 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
       return res.status(401).send("Missing Discord signature headers or public key");
     }
 
-    const isValid = verifyKey(rawBody, signature, timestamp, DISCORD_PUBLIC_KEY);
+    const isValid = await verifyKey(
+      rawBody,
+      signature,
+      timestamp,
+      DISCORD_PUBLIC_KEY
+    );
+
     console.log("verifyKey result:", isValid);
 
     if (!isValid) {
@@ -46,13 +52,13 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
     const interaction = JSON.parse(rawBody.toString("utf8"));
     console.log("interaction type:", interaction.type);
 
-    // Discord verification
+    // Discord endpoint verification
     if (interaction.type === InteractionType.PING) {
       console.log("Returning PONG");
       return res.json({ type: InteractionResponseType.PONG });
     }
 
-    // Slash command
+    // Slash command handling
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data?.name;
 
@@ -132,6 +138,10 @@ app.post("/complete-spin", async (req, res) => {
   try {
     const { sessionId, reward } = req.body;
 
+    console.log("=== /complete-spin hit ===");
+    console.log("sessionId:", sessionId);
+    console.log("reward:", reward);
+
     if (!sessionId || !reward) {
       return res.status(400).json({ error: "sessionId and reward are required" });
     }
@@ -191,6 +201,10 @@ app.post("/spin", async (req, res) => {
   try {
     const { spinnerName = "Test User", discordUserId = "manual-test" } = req.body || {};
     const sessionId = crypto.randomBytes(6).toString("hex");
+
+    console.log("=== /spin manual test hit ===");
+    console.log("spinnerName:", spinnerName);
+    console.log("discordUserId:", discordUserId);
 
     await createSpinRecord(spinnerName, discordUserId, sessionId);
 
