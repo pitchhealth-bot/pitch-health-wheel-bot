@@ -18,17 +18,17 @@ const {
 } = process.env;
 
 /* =========================
-   SIMPLE CORS
+   CORS
 ========================= */
 
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "https://pitch-health-wheel-web.vercel.app");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Origin", "https://pitch-health-wheel-web.vercel.app");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   next();
 });
 
-app.options("*", (req, res) => {
+app.options(/.*/, (req, res) => {
   res.sendStatus(204);
 });
 
@@ -70,6 +70,7 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
 
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data?.name;
+      console.log("commandName:", commandName);
 
       if (commandName === "spin") {
         const user = interaction.member?.user || interaction.user;
@@ -152,10 +153,6 @@ async function createSpinRecord({
   sessionId,
   interactionToken,
 }) {
-  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
-    throw new Error("Missing Airtable environment variables");
-  }
-
   const url = getBaseUrl();
 
   const payload = {
@@ -251,6 +248,7 @@ app.post("/complete-spin", async (req, res) => {
     const currentStatus = record.fields["Status"];
     const existingReward = record.fields["Reward"] || "";
     const interactionToken = record.fields["Interaction Token"];
+    const spinnerName = record.fields["Spinner Name"] || "Someone";
 
     if (currentStatus === "Completed") {
       return res.json({
@@ -290,11 +288,7 @@ app.post("/complete-spin", async (req, res) => {
 
     console.log("Airtable update success");
 
-    if (!interactionToken) {
-      console.error("No Interaction Token found on Airtable record");
-    } else if (!DISCORD_APPLICATION_ID) {
-      console.error("Missing DISCORD_APPLICATION_ID in environment");
-    } else {
+    if (interactionToken && DISCORD_APPLICATION_ID) {
       const discordWebhookUrl = `https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interactionToken}`;
 
       const discordResponse = await fetch(discordWebhookUrl, {
@@ -303,21 +297,19 @@ app.post("/complete-spin", async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          content: `🎉 Final result: **${reward}**`,
+          content: `🎉🎊 ${spinnerName} won ${reward}! 🎊🎉`,
         }),
       });
 
       const discordText = await discordResponse.text();
 
       if (!discordResponse.ok) {
-        console.error(
-          "Discord follow-up failed:",
-          discordResponse.status,
-          discordText
-        );
+        console.error("Discord follow-up failed:", discordResponse.status, discordText);
       } else {
         console.log("Discord follow-up sent");
       }
+    } else {
+      console.error("Missing interaction token or DISCORD_APPLICATION_ID");
     }
 
     return res.json({
