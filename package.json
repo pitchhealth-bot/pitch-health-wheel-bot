@@ -1,0 +1,12 @@
+{
+  "name": "pitch-health-wheel-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "airtable": "^0.12.2",
+    "express": "^4.21.2"
+  }
+}
