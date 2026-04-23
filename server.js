@@ -68,16 +68,22 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
         const discordUserId = user?.id || "";
         const sessionId = crypto.randomBytes(6).toString("hex");
 
-        await createSpinRecord(spinnerName, discordUserId, sessionId);
-
         const wheelUrl = `${WHEEL_BASE_URL}?session=${sessionId}`;
 
-        return res.json({
+        // 🔥 Respond to Discord IMMEDIATELY
+        res.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
             content: `🎡 ${spinnerName}, spin your reward!\n\n👉 ${wheelUrl}`,
           },
         });
+
+        // 🔥 Create Airtable record in background
+        createSpinRecord(spinnerName, discordUserId, sessionId).catch((error) => {
+          console.error("Background Airtable create failed:", error);
+        });
+
+        return;
       }
     }
 
