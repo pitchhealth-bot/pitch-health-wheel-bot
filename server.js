@@ -1,10 +1,15 @@
-import express from "express";
-import crypto from "crypto";
-import {
-  InteractionType,
-  InteractionResponseType,
-  verifyKey,
-} from "discord-interactions";
+{
+  "name": "pitch-health-wheel-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "discord-interactions": "^4.0.1",
+    "express": "^4.21.2"
+  }
+}
 
 const app = express();
 
