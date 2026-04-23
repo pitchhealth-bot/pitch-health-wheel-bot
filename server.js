@@ -1,6 +1,5 @@
 import express from "express";
 import crypto from "crypto";
-import fetch from "node-fetch";
 import {
   InteractionType,
   InteractionResponseType,
@@ -17,69 +16,97 @@ const {
   WHEEL_BASE_URL,
 } = process.env;
 
-/* =========================
-   DISCORD INTERACTIONS
-========================= */
-
+/*
+  DISCORD INTERACTIONS
+  IMPORTANT:
+  - Must use express.text() here so Discord signature verification uses raw body
+*/
 app.post("/interactions", express.text({ type: "application/json" }), async (req, res) => {
   try {
+    console.log("=== /interactions hit ===");
+    console.log("signature header exists:", !!req.get("X-Signature-Ed25519"));
+    console.log("timestamp header exists:", !!req.get("X-Signature-Timestamp"));
+    console.log("public key exists:", !!DISCORD_PUBLIC_KEY);
+    console.log("raw body:", req.body);
+
     const signature = req.get("X-Signature-Ed25519");
     const timestamp = req.get("X-Signature-Timestamp");
 
+    if (!signature || !timestamp || !DISCORD_PUBLIC_KEY) {
+      console.log("Missing Discord signature headers or public key");
+      return res.status(401).send("Missing Discord signature headers or public key");
+    }
+
     const isValid = verifyKey(req.body, signature, timestamp, DISCORD_PUBLIC_KEY);
+    console.log("verifyKey result:", isValid);
 
     if (!isValid) {
+      console.log("Invalid signature");
       return res.status(401).send("Invalid signature");
     }
 
     const interaction = JSON.parse(req.body);
+    console.log("interaction type:", interaction.type);
 
-    // Ping check
+    // Discord verification ping
     if (interaction.type === InteractionType.PING) {
+      console.log("Returning PONG");
       return res.json({ type: InteractionResponseType.PONG });
     }
 
-    // Slash command
+    // Slash commands
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-      if (interaction.data.name === "spin") {
-        const user = interaction.member?.user || interaction.user;
+      const commandName = interaction.data?.name;
+      console.log("commandName:", commandName);
 
+      if (commandName === "spin") {
+        const user = interaction.member?.user || interaction.user;
+        const spinnerName = user?.global_name || user?.username || "Unknown User";
+        const discordUserId = user?.id || "";
         const sessionId = crypto.randomBytes(6).toString("hex");
 
-        await createSpinRecord(user.username, user.id, sessionId);
+        console.log("Creating spin record for:", spinnerName, discordUserId, sessionId);
+
+        await createSpinRecord(spinnerName, discordUserId, sessionId);
 
         const wheelUrl = `${WHEEL_BASE_URL}?session=${sessionId}`;
 
         return res.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `🎡 ${user.username}, spin your reward!\n\n👉 ${wheelUrl}`,
+            content: `🎡 ${spinnerName}, spin your reward!\n\n👉 ${wheelUrl}`,
           },
         });
       }
     }
 
-    return res.json({});
+    return res.json({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "Unknown command.",
+      },
+    });
   } catch (err) {
-    console.error(err);
-    return res.status(500).send("Error");
+    console.error("interaction route error:", err);
+    return res.status(500).send("Error handling interaction");
   }
 });
 
-/* =========================
-   JSON FOR OTHER ROUTES
-========================= */
-
+/*
+  Use normal JSON parsing AFTER /interactions
+*/
 app.use(express.json());
 
-/* =========================
-   AIRTABLE
-========================= */
+async function createSpinRecord(spinnerName, discordUserId, sessionId) {
+  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
+    throw new Error("Missing Airtable environment variables");
+  }
 
-async function createSpinRecord(name, discordId, sessionId) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
+    AIRTABLE_TABLE_NAME
+  )}`;
 
-  await fetch(url, {
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${AIRTABLE_TOKEN}`,
@@ -89,8 +116,8 @@ async function createSpinRecord(name, discordId, sessionId) {
       records: [
         {
           fields: {
-            "Spinner Name": name,
-            "Discord User ID": discordId,
+            "Spinner Name": spinnerName,
+            "Discord User ID": discordUserId,
             "Session ID": sessionId,
             "Status": "Pending",
           },
@@ -98,29 +125,53 @@ async function createSpinRecord(name, discordId, sessionId) {
       ],
     }),
   });
-}
 
-/* =========================
-   COMPLETE SPIN
-========================= */
+  if (!response.ok) {
+    const text = await response.text();
+    console.error("Airtable create failed:", response.status, text);
+    throw new Error(`Airtable create failed: ${response.status} ${text}`);
+  }
+}
 
 app.post("/complete-spin", async (req, res) => {
   try {
     const { sessionId, reward } = req.body;
 
-    const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
+    console.log("=== /complete-spin hit ===");
+    console.log("sessionId:", sessionId);
+    console.log("reward:", reward);
 
-    const find = await fetch(`${url}?filterByFormula={Session ID}='${sessionId}'`, {
-      headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` },
+    if (!sessionId || !reward) {
+      return res.status(400).json({ error: "sessionId and reward are required" });
+    }
+
+    const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
+      AIRTABLE_TABLE_NAME
+    )}`;
+
+    const filterFormula = encodeURIComponent(`{Session ID}='${sessionId}'`);
+
+    const findResponse = await fetch(`${baseUrl}?filterByFormula=${filterFormula}`, {
+      headers: {
+        Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+      },
     });
 
-    const data = await find.json();
+    if (!findResponse.ok) {
+      const text = await findResponse.text();
+      console.error("Airtable lookup failed:", findResponse.status, text);
+      throw new Error(`Airtable lookup failed: ${findResponse.status} ${text}`);
+    }
 
-    const recordId = data.records[0]?.id;
+    const data = await findResponse.json();
 
-    if (!recordId) return res.status(404).json({ error: "Not found" });
+    if (!data.records || data.records.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
-    await fetch(`${url}/${recordId}`, {
+    const recordId = data.records[0].id;
+
+    const updateResponse = await fetch(`${baseUrl}/${recordId}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${AIRTABLE_TOKEN}`,
@@ -134,19 +185,51 @@ app.post("/complete-spin", async (req, res) => {
       }),
     });
 
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed" });
+    if (!updateResponse.ok) {
+      const text = await updateResponse.text();
+      console.error("Airtable update failed:", updateResponse.status, text);
+      throw new Error(`Airtable update failed: ${updateResponse.status} ${text}`);
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Complete spin error:", error);
+    return res.status(500).json({ error: "Failed to complete spin" });
   }
 });
 
-/* =========================
-   HEALTH
-========================= */
+/*
+  Optional manual test route
+*/
+app.post("/spin", async (req, res) => {
+  try {
+    const { spinnerName = "Test User", discordUserId = "manual-test" } = req.body || {};
+    const sessionId = crypto.randomBytes(6).toString("hex");
 
-app.get("/", (req, res) => {
-  res.send("Bot running");
+    console.log("=== /spin manual test hit ===");
+    console.log("spinnerName:", spinnerName);
+    console.log("discordUserId:", discordUserId);
+
+    await createSpinRecord(spinnerName, discordUserId, sessionId);
+
+    const wheelUrl = `${WHEEL_BASE_URL}?session=${sessionId}`;
+
+    return res.json({
+      success: true,
+      sessionId,
+      wheelUrl,
+    });
+  } catch (error) {
+    console.error("Manual spin error:", error);
+    return res.status(500).json({ error: "Failed to create spin" });
+  }
 });
 
-app.listen(10000, () => console.log("Running on 10000"));
+app.get("/", (req, res) => {
+  res.send("Pitch Health Wheel Bot is running");
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Running on ${PORT}`);
+});
