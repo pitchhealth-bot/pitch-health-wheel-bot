@@ -56,7 +56,6 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
 
         const wheelUrl = `${WHEEL_BASE_URL}?session=${sessionId}`;
 
-        // Reply immediately so Discord does not time out
         res.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
@@ -64,7 +63,6 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
           },
         });
 
-        // Save record in background
         createSpinRecord({
           spinnerName,
           discordUserId,
@@ -92,24 +90,44 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
 
 app.use(express.json());
 
+function getBaseUrl() {
+  return `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
+    AIRTABLE_TABLE_NAME
+  )}`;
+}
+
+async function airtableFetch(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+      ...(options.headers || {}),
+    },
+  });
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  return { response, data, text };
+}
+
 async function createSpinRecord({
   spinnerName,
   discordUserId,
   sessionId,
   interactionToken,
 }) {
-  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
-    throw new Error("Missing Airtable environment variables");
-  }
+  const url = getBaseUrl();
 
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
-    AIRTABLE_TABLE_NAME
-  )}`;
-
-  const response = await fetch(url, {
+  const { response, text } = await airtableFetch(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${AIRTABLE_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -128,30 +146,22 @@ async function createSpinRecord({
   });
 
   if (!response.ok) {
-    const text = await response.text();
     throw new Error(`Airtable create failed: ${response.status} ${text}`);
   }
 }
 
 async function findSpinRecord(sessionId) {
-  const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
-    AIRTABLE_TABLE_NAME
-  )}`;
-
+  const baseUrl = getBaseUrl();
   const filterFormula = encodeURIComponent(`{Session ID}='${sessionId}'`);
 
-  const response = await fetch(`${baseUrl}?filterByFormula=${filterFormula}`, {
-    headers: {
-      Authorization: `Bearer ${AIRTABLE_TOKEN}`,
-    },
-  });
+  const { response, data, text } = await airtableFetch(
+    `${baseUrl}?filterByFormula=${filterFormula}`
+  );
 
   if (!response.ok) {
-    const text = await response.text();
     throw new Error(`Airtable lookup failed: ${response.status} ${text}`);
   }
 
-  const data = await response.json();
   return data.records?.[0] || null;
 }
 
@@ -176,13 +186,17 @@ app.get("/session-status", async (req, res) => {
     });
   } catch (error) {
     console.error("Session status error:", error);
-    return res.status(500).json({ error: "Failed to fetch session status" });
+    return res.status(500).json({ error: error.message });
   }
 });
 
 app.post("/complete-spin", async (req, res) => {
   try {
     const { sessionId, reward } = req.body;
+
+    console.log("=== /complete-spin hit ===");
+    console.log("sessionId:", sessionId);
+    console.log("reward:", reward);
 
     if (!sessionId || !reward) {
       return res.status(400).json({ error: "sessionId and reward are required" });
@@ -194,12 +208,14 @@ app.post("/complete-spin", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
+    console.log("Found Airtable record:", record.id);
+    console.log("Current fields:", record.fields);
+
     const recordId = record.id;
     const currentStatus = record.fields["Status"];
     const existingReward = record.fields["Reward"] || "";
     const interactionToken = record.fields["Interaction Token"];
 
-    // Prevent re-spin
     if (currentStatus === "Completed") {
       return res.json({
         success: true,
@@ -208,30 +224,36 @@ app.post("/complete-spin", async (req, res) => {
       });
     }
 
-    const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
-      AIRTABLE_TABLE_NAME
-    )}`;
+    const baseUrl = getBaseUrl();
 
-    const updateResponse = await fetch(`${baseUrl}/${recordId}`, {
+    const updatePayload = {
+      fields: {
+        "Reward": reward,
+        "Status": "Completed",
+      },
+    };
+
+    console.log("Updating Airtable with payload:", updatePayload);
+
+    const { response, text } = await airtableFetch(`${baseUrl}/${recordId}`, {
       method: "PATCH",
       headers: {
-        Authorization: `Bearer ${AIRTABLE_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        fields: {
-          "Reward": reward,
-          "Status": "Completed",
-        },
-      }),
+      body: JSON.stringify(updatePayload),
     });
 
-    if (!updateResponse.ok) {
-      const text = await updateResponse.text();
-      throw new Error(`Airtable update failed: ${updateResponse.status} ${text}`);
+    if (!response.ok) {
+      console.error("Airtable update failed:", response.status, text);
+      return res.status(500).json({
+        error: "Airtable update failed",
+        status: response.status,
+        details: text,
+      });
     }
 
-    // Push result back to Discord
+    console.log("Airtable update success");
+
     if (interactionToken && DISCORD_APPLICATION_ID) {
       const discordResponse = await fetch(
         `https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interactionToken}`,
@@ -247,8 +269,10 @@ app.post("/complete-spin", async (req, res) => {
       );
 
       if (!discordResponse.ok) {
-        const text = await discordResponse.text();
-        console.error("Discord follow-up failed:", discordResponse.status, text);
+        const discordText = await discordResponse.text();
+        console.error("Discord follow-up failed:", discordResponse.status, discordText);
+      } else {
+        console.log("Discord follow-up sent");
       }
     }
 
@@ -258,7 +282,10 @@ app.post("/complete-spin", async (req, res) => {
     });
   } catch (error) {
     console.error("Complete spin error:", error);
-    return res.status(500).json({ error: "Failed to complete spin" });
+    return res.status(500).json({
+      error: "Failed to complete spin",
+      details: error.message,
+    });
   }
 });
 
