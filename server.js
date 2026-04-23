@@ -17,10 +17,25 @@ const {
   WHEEL_BASE_URL,
 } = process.env;
 
-/*
-  DISCORD INTERACTIONS
-  Use express.raw so Discord signature verification uses exact raw bytes
-*/
+/* =========================
+   SIMPLE CORS
+========================= */
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "https://pitch-health-wheel-web.vercel.app");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  next();
+});
+
+app.options("*", (req, res) => {
+  res.sendStatus(204);
+});
+
+/* =========================
+   DISCORD INTERACTIONS
+========================= */
+
 app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
   try {
     const signature = req.get("X-Signature-Ed25519");
@@ -30,7 +45,6 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
     console.log("=== /interactions hit ===");
 
     if (!signature || !timestamp || !DISCORD_PUBLIC_KEY) {
-      console.log("Missing Discord signature headers or public key");
       return res.status(401).send("Missing Discord signature headers or public key");
     }
 
@@ -51,13 +65,11 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
     console.log("interaction type:", interaction.type);
 
     if (interaction.type === InteractionType.PING) {
-      console.log("Returning PONG");
       return res.json({ type: InteractionResponseType.PONG });
     }
 
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data?.name;
-      console.log("commandName:", commandName);
 
       if (commandName === "spin") {
         const user = interaction.member?.user || interaction.user;
@@ -69,7 +81,6 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
 
         const wheelUrl = `${WHEEL_BASE_URL}?session=${sessionId}`;
 
-        // Respond immediately to avoid Discord timeout
         res.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
@@ -77,7 +88,6 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
           },
         });
 
-        // Save Airtable record in the background
         createSpinRecord({
           spinnerName,
           discordUserId,
@@ -103,9 +113,10 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
   }
 });
 
-/*
-  Use normal JSON parsing for all non-Discord routes
-*/
+/* =========================
+   JSON FOR NORMAL ROUTES
+========================= */
+
 app.use(express.json());
 
 function getBaseUrl() {
@@ -236,17 +247,12 @@ app.post("/complete-spin", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    console.log("Found Airtable record:", record.id);
-    console.log("Current Airtable fields:", record.fields);
-
     const recordId = record.id;
     const currentStatus = record.fields["Status"];
     const existingReward = record.fields["Reward"] || "";
     const interactionToken = record.fields["Interaction Token"];
 
-    // Prevent re-spin
     if (currentStatus === "Completed") {
-      console.log("Session already completed. Returning existing reward.");
       return res.json({
         success: true,
         alreadyCompleted: true,
@@ -284,15 +290,12 @@ app.post("/complete-spin", async (req, res) => {
 
     console.log("Airtable update success");
 
-    // Push result back to Discord
     if (!interactionToken) {
       console.error("No Interaction Token found on Airtable record");
     } else if (!DISCORD_APPLICATION_ID) {
       console.error("Missing DISCORD_APPLICATION_ID in environment");
     } else {
       const discordWebhookUrl = `https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interactionToken}`;
-
-      console.log("Sending Discord follow-up to:", discordWebhookUrl);
 
       const discordResponse = await fetch(discordWebhookUrl, {
         method: "POST",
@@ -313,7 +316,7 @@ app.post("/complete-spin", async (req, res) => {
           discordText
         );
       } else {
-        console.log("Discord follow-up sent:", discordText || "[no body]");
+        console.log("Discord follow-up sent");
       }
     }
 
