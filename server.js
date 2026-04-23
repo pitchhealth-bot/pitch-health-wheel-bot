@@ -17,13 +17,20 @@ const {
   WHEEL_BASE_URL,
 } = process.env;
 
+/*
+  DISCORD INTERACTIONS
+  Use express.raw so Discord signature verification uses exact raw bytes
+*/
 app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
   try {
     const signature = req.get("X-Signature-Ed25519");
     const timestamp = req.get("X-Signature-Timestamp");
     const rawBody = req.body;
 
+    console.log("=== /interactions hit ===");
+
     if (!signature || !timestamp || !DISCORD_PUBLIC_KEY) {
+      console.log("Missing Discord signature headers or public key");
       return res.status(401).send("Missing Discord signature headers or public key");
     }
 
@@ -34,28 +41,35 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
       DISCORD_PUBLIC_KEY
     );
 
+    console.log("verifyKey result:", isValid);
+
     if (!isValid) {
       return res.status(401).send("Invalid signature");
     }
 
     const interaction = JSON.parse(rawBody.toString("utf8"));
+    console.log("interaction type:", interaction.type);
 
     if (interaction.type === InteractionType.PING) {
+      console.log("Returning PONG");
       return res.json({ type: InteractionResponseType.PONG });
     }
 
     if (interaction.type === InteractionType.APPLICATION_COMMAND) {
       const commandName = interaction.data?.name;
+      console.log("commandName:", commandName);
 
       if (commandName === "spin") {
         const user = interaction.member?.user || interaction.user;
-        const spinnerName = user?.global_name || user?.username || "Unknown User";
+        const spinnerName =
+          user?.global_name || user?.username || "Unknown User";
         const discordUserId = user?.id || "";
         const interactionToken = interaction.token;
         const sessionId = crypto.randomBytes(6).toString("hex");
 
         const wheelUrl = `${WHEEL_BASE_URL}?session=${sessionId}`;
 
+        // Respond immediately to avoid Discord timeout
         res.json({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
@@ -63,6 +77,7 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
           },
         });
 
+        // Save Airtable record in the background
         createSpinRecord({
           spinnerName,
           discordUserId,
@@ -88,6 +103,9 @@ app.post("/interactions", express.raw({ type: "*/*" }), async (req, res) => {
   }
 });
 
+/*
+  Use normal JSON parsing for all non-Discord routes
+*/
 app.use(express.json());
 
 function getBaseUrl() {
@@ -123,31 +141,41 @@ async function createSpinRecord({
   sessionId,
   interactionToken,
 }) {
+  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
+    throw new Error("Missing Airtable environment variables");
+  }
+
   const url = getBaseUrl();
+
+  const payload = {
+    records: [
+      {
+        fields: {
+          "Spinner Name": spinnerName,
+          "Discord User ID": discordUserId,
+          "Session ID": sessionId,
+          "Status": "Pending",
+          "Interaction Token": interactionToken,
+        },
+      },
+    ],
+  };
+
+  console.log("Creating Airtable spin record:", payload);
 
   const { response, text } = await airtableFetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      records: [
-        {
-          fields: {
-            "Spinner Name": spinnerName,
-            "Discord User ID": discordUserId,
-            "Session ID": sessionId,
-            "Status": "Pending",
-            "Interaction Token": interactionToken,
-          },
-        },
-      ],
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
     throw new Error(`Airtable create failed: ${response.status} ${text}`);
   }
+
+  console.log("Airtable create success");
 }
 
 async function findSpinRecord(sessionId) {
@@ -209,14 +237,16 @@ app.post("/complete-spin", async (req, res) => {
     }
 
     console.log("Found Airtable record:", record.id);
-    console.log("Current fields:", record.fields);
+    console.log("Current Airtable fields:", record.fields);
 
     const recordId = record.id;
     const currentStatus = record.fields["Status"];
     const existingReward = record.fields["Reward"] || "";
     const interactionToken = record.fields["Interaction Token"];
 
+    // Prevent re-spin
     if (currentStatus === "Completed") {
+      console.log("Session already completed. Returning existing reward.");
       return res.json({
         success: true,
         alreadyCompleted: true,
@@ -254,25 +284,36 @@ app.post("/complete-spin", async (req, res) => {
 
     console.log("Airtable update success");
 
-    if (interactionToken && DISCORD_APPLICATION_ID) {
-      const discordResponse = await fetch(
-        `https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interactionToken}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            content: `🎉 Final result: **${reward}**`,
-          }),
-        }
-      );
+    // Push result back to Discord
+    if (!interactionToken) {
+      console.error("No Interaction Token found on Airtable record");
+    } else if (!DISCORD_APPLICATION_ID) {
+      console.error("Missing DISCORD_APPLICATION_ID in environment");
+    } else {
+      const discordWebhookUrl = `https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interactionToken}`;
+
+      console.log("Sending Discord follow-up to:", discordWebhookUrl);
+
+      const discordResponse = await fetch(discordWebhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          content: `🎉 Final result: **${reward}**`,
+        }),
+      });
+
+      const discordText = await discordResponse.text();
 
       if (!discordResponse.ok) {
-        const discordText = await discordResponse.text();
-        console.error("Discord follow-up failed:", discordResponse.status, discordText);
+        console.error(
+          "Discord follow-up failed:",
+          discordResponse.status,
+          discordText
+        );
       } else {
-        console.log("Discord follow-up sent");
+        console.log("Discord follow-up sent:", discordText || "[no body]");
       }
     }
 
